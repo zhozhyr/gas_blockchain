@@ -44,7 +44,7 @@ docker-compose -f docker-compose.monitoring.yml up -d
 После запуска:
 
 - **Prometheus**: `http://localhost:9090`
-- **Grafana**: `http://localhost:3000` (логин: `admin`, пароль: `admin` по умолчанию)
+- **Grafana**: `http://localhost:3000`
 
 ## Развертывание в Kubernetes
 
