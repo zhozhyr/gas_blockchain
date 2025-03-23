@@ -1,0 +1,18 @@
+replicaCount: 1
+
+image:
+  repository: myrepo/gas-blockchain
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8000
+
+prometheus:
+  enabled: true
+  servicePort: 9090
+
+grafana:
+  enabled: true
+  servicePort: 3000
