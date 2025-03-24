@@ -2,14 +2,17 @@ from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, ValidationError
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
-from fastapi import FastAPI, Request, Response
+from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
+from sqlalchemy.ext.asyncio import AsyncSession
 from database import BlockReference, get_db
 from ml_analysis import detect_anomaly
-from sqlalchemy.orm import Session
-from blockchain import Blockchain
+from blockchain import Blockchain, Transaction as BlockchainTransaction
+from collections import defaultdict
 import os
 import logging
+import asyncio
+from typing import List
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -22,6 +25,7 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+# Инициализация блокчейна
 blockchain = Blockchain()
 security = HTTPBearer()
 
@@ -44,82 +48,63 @@ class MetricsMiddleware(BaseHTTPMiddleware):
 app.add_middleware(MetricsMiddleware)
 
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     if not credentials or credentials.credentials != API_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid API Token")
 
 
-# Эндпоинт для Prometheus
-@app.get(
-    "/metrics/",
-    dependencies=[Depends(verify_token)],
-    tags=["Metrics"],
-    summary="Получить метрику для Prometheus",
-    description="Получить метрику для Prometheus "
-)
-def get_metrics():
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
-
-
-class Transaction(BaseModel):
+# Модель для API
+class APITransaction(BaseModel):
     station_id: str
     input_gas: float
     output_gas: float
     self_consumption: float
 
 
-@app.post(
-    "/transactions/",
-    dependencies=[Depends(verify_token)],
-    tags=["Transactions"],
-    summary="Добавить новую транзакцию",
-    description="Записывает новую транзакцию в блокчейн и сохраняет её хэш в БД."
-)
-def add_transaction(transaction: Transaction, db: Session = Depends(get_db)):
+# Эндпоинты
+@app.get("/metrics/", dependencies=[Depends(verify_token)], tags=["Metrics"])
+async def get_metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.post("/transactions/", dependencies=[Depends(verify_token)], tags=["Transactions"])
+async def add_transaction(transaction: APITransaction, db: AsyncSession = Depends(get_db)):
     try:
-        if transaction.input_gas < 0 or transaction.output_gas < 0 or transaction.self_consumption < 0:
-            logging.error("Invalid transaction data: negative gas values")
-            raise HTTPException(status_code=400, detail="Gas values must be non-negative")
+        logging.info(f"Received transaction: {transaction}")
 
-        is_anomaly = detect_anomaly([transaction.input_gas, transaction.output_gas, transaction.self_consumption])
+        # Добавляем корректные данные в блокчейн
+        blockchain.pending_transactions.append(
+            BlockchainTransaction(
+                sender=transaction.station_id,
+                receiver="blockchain",
+                amount=transaction.input_gas + transaction.output_gas + transaction.self_consumption,
+                input_gas=transaction.input_gas,
+                output_gas=transaction.output_gas,
+                self_consumption=transaction.self_consumption,
+                signature=None
+            )
+        )
 
-        new_block = blockchain.add_block({
-            "station_id": transaction.station_id,
-            "input_gas": transaction.input_gas,
-            "output_gas": transaction.output_gas,
-            "self_consumption": transaction.self_consumption,
-            "is_anomaly": is_anomaly
-        })
+        # Майним блок с накопленными транзакциями
+        new_block = await blockchain.add_block()
 
+        # Записываем в базу данных
         block_ref = BlockReference(block_hash=new_block.hash)
         db.add(block_ref)
-        db.commit()
+        await db.commit()
 
-        logging.info(f"Transaction added for station {transaction.station_id}")
-        return {"message": "Transaction added and recorded in blockchain successfully", "block_hash": new_block.hash}
-    except ValidationError as e:
-        logging.error(f"Validation error: {str(e)}")
-        raise HTTPException(status_code=422, detail=str(e))
+        logging.info(f"New block created: {new_block.hash}")
+
+        return {"message": "Transaction added successfully", "block_hash": new_block.hash}
+
     except Exception as e:
         logging.critical(f"Unexpected error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 
-@app.get(
-    "/blockchain/",
-    dependencies=[Depends(verify_token)],
-    tags=["Blockchain"],
-    summary="Получить текущий блокчейн",
-    description="Возвращает список хэшей блоков, хранящихся в БД."
-)
-def get_blockchain(db: Session = Depends(get_db)):
-    try:
-        block_references = db.query(BlockReference).all()
-        logging.info("Blockchain data retrieved")
-        return block_references
-    except Exception as e:
-        logging.critical(f"Error fetching blockchain: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+@app.get("/blockchain/", dependencies=[Depends(verify_token)])
+async def get_blockchain():
+    return {"chain_length": len(blockchain.chain), "blocks": [block.hash for block in blockchain.chain]}
 
 
 @app.get(
@@ -129,54 +114,57 @@ def get_blockchain(db: Session = Depends(get_db)):
     summary="Получить данные блока",
     description="Возвращает данные блока по его хэшу."
 )
-def get_block(block_hash: str, db: Session = Depends(get_db)):
+async def get_block(block_hash: str):
     try:
-        block = blockchain.get_block_by_hash(block_hash)
-        if block:
-            # Блок найден в блокчейне — возвращаем все данные
-            return {
-                "block_hash": block.hash,
-                "timestamp": block.timestamp,
-                "station_id": block.data["station_id"],
-                "input_gas": block.data["input_gas"],
-                "output_gas": block.data["output_gas"],
-                "self_consumption": block.data["self_consumption"],
-                "gas_difference": block.data["input_gas"] - (block.data["output_gas"] + block.data["self_consumption"])
-            }
-
-        # Если блока нет в блокчейне, но есть в БД
-        block_ref = db.query(BlockReference).filter(BlockReference.block_hash == block_hash).first()
-        if not block_ref:
+        block = next((b for b in blockchain.chain if b.hash == block_hash), None)
+        if not block:
             raise HTTPException(status_code=404, detail="Block not found")
 
-        return {
-            "block_hash": block_ref.block_hash,
-            "timestamp": block_ref.timestamp,
-            "message": "Block stored in DB but no gas data available"
-        }
+        logging.info(f"Fetching block: {block_hash}")
 
+        # Логируем все транзакции в блоке
+        for tx in block.transactions:
+            logging.info(
+                f"TX: sender={tx.sender}, input={getattr(tx, 'input_gas', 0)}, "
+                f"output={getattr(tx, 'output_gas', 0)}, "
+                f"self={getattr(tx, 'self_consumption', 0)}")
+
+        # Агрегируем данные по station_id
+        station_data = defaultdict(lambda: {"input_gas": 0, "output_gas": 0, "self_consumption": 0})
+        for tx in block.transactions:
+            station_data[tx.sender]["input_gas"] += getattr(tx, "input_gas", 0)
+            station_data[tx.sender]["output_gas"] += getattr(tx, "output_gas", 0)
+            station_data[tx.sender]["self_consumption"] += getattr(tx, "self_consumption", 0)
+
+        logging.info(f"Aggregated transactions: {station_data}")
+
+        return {
+            "index": block.index,
+            "timestamp": block.timestamp,
+            "transactions": [
+                {"station_id": station, **data} for station, data in station_data.items()
+            ],
+            "hash": block.hash,
+            "previous_hash": block.previous_hash
+        }
     except Exception as e:
         logging.critical(f"Error fetching block: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 
-@app.post(
-    "/detect_anomaly/",
-    dependencies=[Depends(verify_token)],
-    tags=["Anomaly Detection"],
-    summary="Проверка данных на аномалии",
-    description="Определяет, является ли переданная транзакция аномальной."
-)
-def check_anomaly(transaction: Transaction):
-    is_anomaly = detect_anomaly([transaction.input_gas, transaction.output_gas, transaction.self_consumption])
-    return {"station_id": transaction.station_id, "is_anomaly": is_anomaly}
+class GasData(BaseModel):
+    input_gas: float
+    output_gas: float
+    self_consumption: float
 
 
-@app.get(
-    "/",
-    tags=["General"],
-    summary="Статус API",
-    description="Возвращает сообщение о работоспособности API."
-)
-def root():
-    return {"message": "Gas Balance Blockchain API"}
+@app.post("/detect_anomaly/", dependencies=[Depends(verify_token)], tags=["Anomaly Detection"])
+async def detect_anomaly_endpoint(data: GasData):
+    """Эндпоинт для обнаружения аномалий."""
+    result = await detect_anomaly([data.input_gas, data.output_gas, data.self_consumption])
+    return {"is_anomaly": result}
+
+
+@app.get("/", tags=["General"])
+async def root():
+    return {"message": "Gas Balance Blockchain API", "status": "running"}

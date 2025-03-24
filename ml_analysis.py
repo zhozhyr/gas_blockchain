@@ -2,14 +2,19 @@ import numpy as np
 import joblib
 import os
 import pandas as pd
+import asyncio
+from fastapi import FastAPI, Depends
+from pydantic import BaseModel
 from sklearn.ensemble import IsolationForest
+
+app = FastAPI()
 
 MODEL_PATH = "anomaly_model.pkl"
 DATA_PATH = "gas_data.csv"
 
 
-def generate_realistic_data():
-    """Создает синтетические данные и сохраняет их в CSV."""
+async def generate_realistic_data():
+    """Асинхронное создание и сохранение синтетических данных."""
     normal_data = []
     anomalies = []
 
@@ -41,40 +46,51 @@ def generate_realistic_data():
 
     data = normal_data + anomalies
 
-    # Сохраняем в CSV
     df = pd.DataFrame(data, columns=["input_gas", "output_gas", "self_consumption", "is_anomaly"])
-    df.to_csv(DATA_PATH, index=False)
+
+    # Асинхронная запись в CSV
+    await asyncio.to_thread(df.to_csv, DATA_PATH, index=False)
     print(f"✅ Данные сохранены в {DATA_PATH}")
 
 
-def load_data():
-    """Загружает данные из CSV-файла, если он есть, иначе генерирует."""
+async def load_data():
+    """Асинхронная загрузка данных из CSV."""
     if not os.path.exists(DATA_PATH):
         print("⚠️ Данных нет, создаем тестовый датасет...")
-        generate_realistic_data()
+        await generate_realistic_data()
 
-    df = pd.read_csv(DATA_PATH)
+    df = await asyncio.to_thread(pd.read_csv, DATA_PATH)
     return df[["input_gas", "output_gas", "self_consumption"]].values
 
 
-def train_model():
-    """Обучает и сохраняет модель на данных из файла."""
-    data = load_data()
+async def train_model():
+    """Асинхронное обучение модели и сохранение в файл."""
+    data = await load_data()
     model = IsolationForest(contamination=0.02, random_state=42)
-    model.fit(data)
-    joblib.dump(model, MODEL_PATH)
+
+    await asyncio.to_thread(model.fit, data)
+    await asyncio.to_thread(joblib.dump, model, MODEL_PATH)
+
     print(f"✅ Модель обучена и сохранена в {MODEL_PATH}")
 
 
-def load_model():
-    """Загружает модель из файла."""
+async def load_model():
+    """Асинхронная загрузка модели."""
     if not os.path.exists(MODEL_PATH):
-        train_model()  # Если модели нет – обучаем
-    return joblib.load(MODEL_PATH)
+        await train_model()  # Если модели нет – обучаем
+
+    return await asyncio.to_thread(joblib.load, MODEL_PATH)
 
 
-def detect_anomaly(input_data):
-    """Проверяет данные на аномалии и возвращает bool."""
-    model = load_model()
-    result = model.predict([input_data])  # -1 = аномалия, 1 = нормально
-    return bool(result[0] == -1)  # Преобразуем numpy.bool_ в стандартный bool
+async def detect_anomaly(input_data):
+    """Асинхронная проверка данных на аномалии."""
+    model = await load_model()
+    data = np.array([input_data])
+    result = await asyncio.to_thread(model.predict, data)  # -1 = аномалия, 1 = нормально
+    return bool(result[0] == -1)
+
+
+async def verify_token():
+    """Фиктивная проверка токена (замени на реальную логику)."""
+    await asyncio.sleep(0.1)  # Симуляция проверки
+    return True

@@ -1,26 +1,21 @@
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, func
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-DATABASE_URL = "postgresql://postgres:postgres@db:5432/gas_db"
-
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+DATABASE_URL = "postgresql+asyncpg://postgres:postgres@db:5432/gas_db"
+engine = create_async_engine(DATABASE_URL)
+AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 
-# Определяем таблицу через ORM
 class BlockReference(Base):
     __tablename__ = "blocks"
-
     id = Column(Integer, primary_key=True, index=True)
     block_hash = Column(String, unique=True, nullable=False)
     timestamp = Column(DateTime, default=func.now())
 
-# Функция для работы с сессией БД
-def get_db():
-    db = SessionLocal()
-    try:
+
+async def get_db():
+    async with AsyncSessionLocal() as db:
         yield db
-    finally:
-        db.close()
 
