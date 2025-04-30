@@ -13,7 +13,6 @@ SQLAlchemy, Alembic, Blockchain**, а также мониторинга чере
 - **SQLAlchemy + Alembic** – работа с БД и миграции
 - **Blockchain** – хранение транзакций
 - **Prometheus + Grafana** – мониторинг и визуализация метрик
-- **Kubernetes + Helm** – развертывание в кластере
 
 ## Запуск проекта (Docker Compose)
 
@@ -46,25 +45,6 @@ docker-compose -f docker-compose.monitoring.yml up -d
 - **Prometheus**: `http://localhost:9090`
 - **Grafana**: `http://localhost:3000`
 
-## Развертывание в Kubernetes
-
-1. Установить Helm:
-   ```sh
-   choco install kubernetes-helm  # для Windows
-   sudo apt install helm           # для Linux
-   ```
-2. Создать Helm-чарт:
-   ```sh
-   helm install gas-monitoring ./helm
-   ```
-3. Проверить статус:
-   ```sh
-   kubectl get pods
-   ```
-4. Открыть веб-интерфейс Grafana:
-   ```sh
-   kubectl port-forward svc/grafana 3000:3000
-   ```
 
 ## API эндпоинты
 
